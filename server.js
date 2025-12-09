@@ -9,19 +9,6 @@ const PORT = process.env.PORT || 3001;
 
 const QB_CLIENT_ID = 'ABlvo2Ct9EVpIvCAlMxuzVQITLsKwGl6r25k4W01DUSw5iLVOM';
 const QB_CLIENT_SECRET = 'pYklJF0DE1JUE0J6eVQ5mOtVawCbJJLxt9bLbLai';
-```
-
-5. Commit the changes
-
----
-
-**Also add Production Redirect URI in QuickBooks:**
-
-1. Go to QuickBooks Developer → Settings → **Redirect URIs**
-2. Click on **Production** tab
-3. Add this URI:
-```
-   https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback
 const REDIRECT_URI = 'https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback';
 
 const AUTH_URL = 'https://appcenter.intuit.com/connect/oauth2';
@@ -187,3 +174,5 @@ loadTokens().then(function() {
         console.log('Redirect URI: ' + REDIRECT_URI);
     });
 });
+```
+
