@@ -9,13 +9,6 @@ const PORT = process.env.PORT || 3001;
 
 const QB_CLIENT_ID = 'ABlvo2Ct9EVpIvCAlMxuzVQITLsKwGl6r25k4W01DUSw5iLVOM';
 const QB_CLIENT_SECRET = 'RaEiwVXav0RocxjANNkI5IoKpiP26Svnza4dRiyr';
-```
-
-6. Commit the changes
-
-Wait for Railway to redeploy (about 30-60 seconds), then open a **new incognito window** and try connecting:
-```
-https://primenationalcredit-ai.github.io/asap-dashboard/
 const REDIRECT_URI = 'https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback';
 
 const AUTH_URL = 'https://appcenter.intuit.com/connect/oauth2';
