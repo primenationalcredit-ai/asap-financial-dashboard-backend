@@ -115,7 +115,7 @@ app.get('/api/quickbooks/status', function(req, res) {
     res.json({ connected: !!tokens.access_token, company_id: tokens.realm_id });
 });
 
-app.post('/api/quickbooks/disconnect', async function(req, res) {
+app.get('/api/quickbooks/disconnect', async function(req, res) {
     tokens = { access_token: null, refresh_token: null, expires_at: null, realm_id: null };
     await saveTokens();
     res.json({ success: true });
