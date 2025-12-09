@@ -176,3 +176,6 @@ loadTokens().then(function() {
 });
 ```
 
+Commit and wait for Railway to redeploy. Then test:
+```
+https://asap-financial-dashboard-backend-production-b444.up.railway.app/
