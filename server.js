@@ -12,9 +12,16 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Read environment variables directly
-const QB_CLIENT_ID = process.env.QB_CLIENT_ID;
-const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI;
+const QB_CLIENT_ID = process.env.QB_CLIENT_ID || 'ABpPICXjHYvW5m9HnZUAuDjYcXOOpsZitHPN3kLeX1l7Im75a2';
+const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET || 'aLfq67TCVTahuI2leAoblXkiWmgm3L0kzH120X6e';
+const REDIRECT_URI = process.env.REDIRECT_URI || 'https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback';
+```
+
+6. Commit the changes
+
+Wait for Railway to redeploy, then test:
+```
+https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/auth
 
 // Log startup config (without secrets)
 console.log('Starting server with config:');
