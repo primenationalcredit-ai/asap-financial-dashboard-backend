@@ -7,7 +7,6 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Credentials - hardcoded for now
 const QB_CLIENT_ID = 'ABpPICXjHYvW5m9HnZUAuDjYcXOOpsZitHPN3kLeX1l7Im75a2';
 const QB_CLIENT_SECRET = 'aLfq67TCVTahuI2leAoblXkiWmgm3L0kzH120X6e';
 const REDIRECT_URI = 'https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback';
@@ -105,7 +104,7 @@ app.get('/api/quickbooks/callback', async function(req, res) {
         var data = JSON.parse(text);
         tokens = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + (data.expires_in * 1000), realm_id: realmId };
         await saveTokens();
-        res.json({ success: true });
+        res.redirect('https://primenationalcredit-ai.github.io/asap-dashboard/?connected=true');
     } catch (err) {
         console.error('Callback error:', err.message);
         res.status(500).json({ error: err.message });
