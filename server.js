@@ -105,7 +105,14 @@ app.get('/api/quickbooks/callback', async function(req, res) {
         var data = JSON.parse(text);
         tokens = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + (data.expires_in * 1000), realm_id: realmId };
         await saveTokens();
-        res.json({ success: true });
+        res.redirect('https://primenationalcredit-ai.github.io/asap-dashboard/?connected=true');
+```
+
+5. Commit
+
+After Railway redeploys, go directly to your dashboard:
+```
+https://primenationalcredit-ai.github.io/asap-dashboard/
     } catch (err) {
         console.error('Callback error:', err.message);
         res.status(500).json({ error: err.message });
