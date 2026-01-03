@@ -1,33 +1,44 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const fs = require('fs').promises;
+const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-
-const QB_CLIENT_ID = 'ABlvo2Ct9EVpIvCAlMxuzVQITLsKwGl6r25k4W01DUSw5iLVOM';
-const QB_CLIENT_SECRET = 'RaEiwVXav0RocxjANNkI5IoKpiP26Svnza4dRiyr';
-const REDIRECT_URI = 'https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback';
-
-const AUTH_URL = 'https://appcenter.intuit.com/connect/oauth2';
-const TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
-const API_BASE = 'https://quickbooks.api.intuit.com/v3/company';
-
-const TOKEN_FILE = path.join('/tmp', 'tokens.json');
-const DATA_FILE = path.join('/tmp', 'financial_data.json');
-
 app.use(cors());
 app.use(express.json());
 
-var tokens = { access_token: null, refresh_token: null, expires_at: null, realm_id: null };
+const PORT = process.env.PORT || 3001;
 
+// QuickBooks OAuth Configuration
+const QB_CLIENT_ID = process.env.QB_CLIENT_ID;
+const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET;
+const QB_REDIRECT_URI = process.env.QB_REDIRECT_URI || 'https://asap-financial-dashboard-backend-production-b444.up.railway.app/api/quickbooks/callback';
+const QB_ENVIRONMENT = process.env.QB_ENVIRONMENT || 'production';
+
+const QB_AUTH_URL = 'https://appcenter.intuit.com/connect/oauth2';
+const QB_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+const QB_API_BASE = QB_ENVIRONMENT === 'sandbox' 
+    ? 'https://sandbox-quickbooks.api.intuit.com'
+    : 'https://quickbooks.api.intuit.com';
+
+// Token storage
+let tokens = {
+    access_token: null,
+    refresh_token: null,
+    realm_id: null,
+    expires_at: null
+};
+
+// Try to load tokens from file (for persistence across restarts)
+const TOKEN_FILE = './qb_tokens.json';
 async function loadTokens() {
     try {
-        var data = await fs.readFile(TOKEN_FILE, 'utf8');
-        tokens = JSON.parse(data);
-        console.log('Loaded saved tokens, realm_id:', tokens.realm_id);
+        if (fs.existsSync(TOKEN_FILE)) {
+            const data = fs.readFileSync(TOKEN_FILE, 'utf8');
+            tokens = JSON.parse(data);
+            console.log('✓ Loaded saved tokens');
+        }
     } catch (err) {
         console.log('No saved tokens found');
     }
@@ -35,358 +46,495 @@ async function loadTokens() {
 
 async function saveTokens() {
     try {
-        await fs.writeFile(TOKEN_FILE, JSON.stringify(tokens, null, 2));
-        console.log('Tokens saved');
+        fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
     } catch (err) {
         console.error('Error saving tokens:', err);
     }
 }
 
-async function refreshAccessToken() {
-    if (!tokens.refresh_token) throw new Error('No refresh token available');
-    var credentials = Buffer.from(QB_CLIENT_ID + ':' + QB_CLIENT_SECRET).toString('base64');
-    var response = await fetch(TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json', 'Authorization': 'Basic ' + credentials },
-        body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token })
-    });
-    if (!response.ok) throw new Error('Token refresh failed: ' + await response.text());
-    var data = await response.json();
-    tokens.access_token = data.access_token;
-    tokens.refresh_token = data.refresh_token;
-    tokens.expires_at = Date.now() + (data.expires_in * 1000);
-    await saveTokens();
-}
+// ========== AUTH ENDPOINTS ==========
 
-async function getAccessToken() {
-    if (!tokens.access_token) throw new Error('Not authenticated');
-    if (tokens.expires_at && Date.now() > tokens.expires_at - 300000) await refreshAccessToken();
-    return tokens.access_token;
-}
+app.get('/api/quickbooks/auth', (req, res) => {
+    const scopes = 'com.intuit.quickbooks.accounting';
+    const authUrl = `${QB_AUTH_URL}?client_id=${QB_CLIENT_ID}&response_type=code&scope=${scopes}&redirect_uri=${encodeURIComponent(QB_REDIRECT_URI)}&state=security_token`;
+    res.json({ url: authUrl });
+});
 
-async function qbRequest(endpoint) {
-    var accessToken = await getAccessToken();
-    var url = API_BASE + '/' + tokens.realm_id + endpoint;
-    console.log('QB Request:', url);
-    var response = await fetch(url, {
-        headers: { 'Authorization': 'Bearer ' + accessToken, 'Accept': 'application/json' }
-    });
-    if (!response.ok) {
-        var errText = await response.text();
-        console.error('QB API error:', errText);
-        throw new Error('QB API error: ' + errText);
+app.get('/api/quickbooks/callback', async (req, res) => {
+    const { code, realmId } = req.query;
+    
+    if (!code) {
+        return res.status(400).send('Missing authorization code');
     }
+
+    try {
+        const authHeader = Buffer.from(`${QB_CLIENT_ID}:${QB_CLIENT_SECRET}`).toString('base64');
+        
+        const response = await fetch(QB_TOKEN_URL, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': `Basic ${authHeader}`
+            },
+            body: `grant_type=authorization_code&code=${code}&redirect_uri=${encodeURIComponent(QB_REDIRECT_URI)}`
+        });
+
+        const tokenData = await response.json();
+
+        if (tokenData.access_token) {
+            tokens = {
+                access_token: tokenData.access_token,
+                refresh_token: tokenData.refresh_token,
+                realm_id: realmId,
+                expires_at: Date.now() + (tokenData.expires_in * 1000)
+            };
+            await saveTokens();
+            console.log('✓ QuickBooks connected successfully');
+            
+            // Redirect to frontend
+            const frontendUrl = process.env.FRONTEND_URL || 'https://primenationalcredit-ai.github.io/asap-dashboard';
+            res.redirect(`${frontendUrl}?connected=true`);
+        } else {
+            console.error('Token error:', tokenData);
+            res.status(400).send('Failed to get access token');
+        }
+    } catch (err) {
+        console.error('OAuth error:', err);
+        res.status(500).send('OAuth error: ' + err.message);
+    }
+});
+
+app.get('/api/quickbooks/status', (req, res) => {
+    res.json({
+        connected: !!tokens.access_token,
+        company_id: tokens.realm_id
+    });
+});
+
+app.post('/api/quickbooks/disconnect', (req, res) => {
+    tokens = { access_token: null, refresh_token: null, realm_id: null, expires_at: null };
+    try { fs.unlinkSync(TOKEN_FILE); } catch (e) {}
+    res.json({ success: true });
+});
+
+// ========== TOKEN REFRESH ==========
+
+async function refreshAccessToken() {
+    if (!tokens.refresh_token) {
+        throw new Error('No refresh token available');
+    }
+
+    const authHeader = Buffer.from(`${QB_CLIENT_ID}:${QB_CLIENT_SECRET}`).toString('base64');
+    
+    const response = await fetch(QB_TOKEN_URL, {
+        method: 'POST',
+        headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': `Basic ${authHeader}`
+        },
+        body: `grant_type=refresh_token&refresh_token=${tokens.refresh_token}`
+    });
+
+    const tokenData = await response.json();
+
+    if (tokenData.access_token) {
+        tokens.access_token = tokenData.access_token;
+        tokens.refresh_token = tokenData.refresh_token || tokens.refresh_token;
+        tokens.expires_at = Date.now() + (tokenData.expires_in * 1000);
+        await saveTokens();
+        console.log('✓ Token refreshed');
+    } else {
+        throw new Error('Failed to refresh token');
+    }
+}
+
+async function ensureValidToken() {
+    if (!tokens.access_token) {
+        throw new Error('Not authenticated');
+    }
+    
+    // Refresh if expired or expiring in next 5 minutes
+    if (tokens.expires_at && Date.now() > tokens.expires_at - 300000) {
+        await refreshAccessToken();
+    }
+}
+
+// ========== QUICKBOOKS API CALLS ==========
+
+async function qbApiCall(endpoint, method = 'GET') {
+    await ensureValidToken();
+    
+    const url = `${QB_API_BASE}/v3/company/${tokens.realm_id}${endpoint}`;
+    
+    const response = await fetch(url, {
+        method,
+        headers: {
+            'Authorization': `Bearer ${tokens.access_token}`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`QB API Error (${endpoint}):`, errorText);
+        throw new Error(`QuickBooks API error: ${response.status}`);
+    }
+
     return response.json();
 }
 
-async function qbQuery(query) {
-    return qbRequest('/query?query=' + encodeURIComponent(query));
-}
+// ========== DATA ENDPOINTS ==========
 
-app.get('/', function(req, res) {
-    res.json({ status: 'ok', message: 'ASAP Financial Dashboard Backend', realm_id: tokens.realm_id });
-});
-
-app.get('/api/quickbooks/auth', function(req, res) {
-    var authUrl = AUTH_URL + '?client_id=' + QB_CLIENT_ID + '&response_type=code&scope=com.intuit.quickbooks.accounting&redirect_uri=' + encodeURIComponent(REDIRECT_URI) + '&state=asap';
-    res.json({ authUrl: authUrl });
-});
-
-app.get('/api/quickbooks/callback', async function(req, res) {
-    var code = req.query.code;
-    var realmId = req.query.realmId;
-    console.log('Callback received, code:', code ? 'yes' : 'no', 'realmId:', realmId);
-    if (!code) return res.status(400).json({ error: 'Missing code' });
+app.get('/api/quickbooks/data', async (req, res) => {
     try {
-        var credentials = Buffer.from(QB_CLIENT_ID + ':' + QB_CLIENT_SECRET).toString('base64');
-        var response = await fetch(TOKEN_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json', 'Authorization': 'Basic ' + credentials },
-            body: new URLSearchParams({ grant_type: 'authorization_code', code: code, redirect_uri: REDIRECT_URI })
-        });
-        var text = await response.text();
-        console.log('Token response:', response.status);
-        if (!response.ok) throw new Error('Token exchange failed: ' + text);
-        var data = JSON.parse(text);
-        tokens = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + (data.expires_in * 1000), realm_id: realmId };
-        await saveTokens();
-        // Clear cached data so fresh data is fetched
-        try { await fs.unlink(DATA_FILE); } catch(e) {}
-        res.redirect('https://primenationalcredit-ai.github.io/asap-dashboard/?connected=true');
-    } catch (err) {
-        console.error('Callback error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/quickbooks/status', function(req, res) {
-    res.json({ connected: !!tokens.access_token, company_id: tokens.realm_id });
-});
-
-// Changed to GET so it's easier to call from browser
-app.get('/api/quickbooks/disconnect', async function(req, res) {
-    tokens = { access_token: null, refresh_token: null, expires_at: null, realm_id: null };
-    await saveTokens();
-    try { await fs.unlink(DATA_FILE); } catch(e) {}
-    res.json({ success: true, message: 'Disconnected from QuickBooks' });
-});
-
-app.get('/api/quickbooks/data', async function(req, res) {
-    try {
-        // Check for cached data (cache for 5 minutes instead of 1 hour for fresher data)
-        try {
-            var cached = await fs.readFile(DATA_FILE, 'utf8');
-            var cdata = JSON.parse(cached);
-            if (cdata.timestamp && Date.now() - cdata.timestamp < 300000) {
-                console.log('Returning cached data');
-                return res.json(cdata);
-            }
-        } catch (e) {}
-        var data = await fetchFinancialData();
-        res.json(data);
-    } catch (err) {
-        console.error('Data error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Force refresh endpoint - bypasses cache
-app.get('/api/quickbooks/refresh', async function(req, res) {
-    try {
-        try { await fs.unlink(DATA_FILE); } catch(e) {}
-        var data = await fetchFinancialData();
-        res.json(data);
-    } catch (err) {
-        console.error('Refresh error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-function parsePLReport(report) {
-    var totalIncome = 0;
-    var totalExpenses = 0;
-    var categories = [];
-    
-    try {
-        if (report && report.Rows && report.Rows.Row) {
-            report.Rows.Row.forEach(function(section) {
-                if (section.group === 'Income' || section.Summary) {
-                    // Look for Income section
-                    if (section.group === 'Income' && section.Summary && section.Summary.ColData) {
-                        var incomeVal = section.Summary.ColData[1];
-                        if (incomeVal && incomeVal.value) {
-                            totalIncome = parseFloat(incomeVal.value) || 0;
-                        }
-                    }
-                }
-                if (section.group === 'Expenses' && section.Summary && section.Summary.ColData) {
-                    var expenseVal = section.Summary.ColData[1];
-                    if (expenseVal && expenseVal.value) {
-                        totalExpenses = parseFloat(expenseVal.value) || 0;
-                    }
-                    // Parse expense categories
-                    if (section.Rows && section.Rows.Row) {
-                        section.Rows.Row.forEach(function(row) {
-                            if (row.ColData && row.ColData[0] && row.ColData[1]) {
-                                var name = row.ColData[0].value;
-                                var amount = parseFloat(row.ColData[1].value) || 0;
-                                if (name && amount > 0) {
-                                    categories.push({ name: name, amount: amount });
-                                }
-                            }
-                            // Handle nested categories
-                            if (row.Rows && row.Rows.Row) {
-                                row.Rows.Row.forEach(function(subrow) {
-                                    if (subrow.ColData && subrow.ColData[0] && subrow.ColData[1]) {
-                                        var subname = subrow.ColData[0].value;
-                                        var subamount = parseFloat(subrow.ColData[1].value) || 0;
-                                        if (subname && subamount > 0) {
-                                            categories.push({ name: subname, amount: subamount });
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
-                }
-                // Also check for NetIncome section
-                if (section.group === 'NetIncome' && section.Summary && section.Summary.ColData) {
-                    // This gives us the final net income
-                }
-            });
+        if (!tokens.access_token) {
+            return res.status(401).json({ error: 'Not authenticated' });
         }
-    } catch (e) {
-        console.error('Error parsing P&L report:', e);
+
+        const data = await fetchFinancialData();
+        res.json(data);
+    } catch (err) {
+        console.error('Data fetch error:', err);
+        res.status(500).json({ error: err.message });
     }
-    
-    // Sort categories by amount descending and take top 5
-    categories.sort(function(a, b) { return b.amount - a.amount; });
-    categories = categories.slice(0, 5);
-    
-    // Assign colors
-    var colors = ['#ef4444', '#f59e0b', '#3b82f6', '#8b5cf6', '#64748b'];
-    categories = categories.map(function(cat, idx) {
-        return { name: cat.name, amount: cat.amount, color: colors[idx] || '#64748b' };
-    });
-    
-    return { totalIncome: totalIncome, totalExpenses: totalExpenses, categories: categories };
-}
+});
+
+app.post('/api/quickbooks/refresh', async (req, res) => {
+    try {
+        if (!tokens.access_token) {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+
+        const data = await fetchFinancialData();
+        res.json({ success: true, data });
+    } catch (err) {
+        console.error('Refresh error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== MAIN DATA FETCH ==========
 
 async function fetchFinancialData() {
-    console.log('Fetching QuickBooks data for realm:', tokens.realm_id);
-    var now = new Date();
-    var year = now.getFullYear();
-    var startDate = year + '-01-01';
-    var endDate = now.toISOString().split('T')[0];
-    
-    // Fetch P&L report for YTD
-    console.log('Fetching P&L report from', startDate, 'to', endDate);
-    var plReport = await qbRequest('/reports/ProfitAndLoss?start_date=' + startDate + '&end_date=' + endDate);
-    console.log('P&L Report received');
-    
-    // Parse the P&L report
-    var plData = parsePLReport(plReport);
-    console.log('Parsed P&L - Income:', plData.totalIncome, 'Expenses:', plData.totalExpenses);
-    
-    // If parsing failed, try to get totals from the raw report header
-    if (plData.totalIncome === 0 && plReport) {
-        console.log('Trying alternative parsing method...');
-        // Log the report structure for debugging
-        console.log('Report structure:', JSON.stringify(plReport).substring(0, 500));
-    }
-    
-    // Fetch monthly P&L for chart data
-    var months = [];
-    var monthlyData = [];
-    for (var i = 5; i >= 0; i--) {
-        var d = new Date(year, now.getMonth() - i, 1);
-        var monthStart = d.toISOString().split('T')[0];
-        var monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
-        months.push({
-            name: d.toLocaleString('default', { month: 'short' }),
-            start: monthStart,
-            end: monthEnd
-        });
-    }
-    
-    // Fetch P&L for each month
-    for (var j = 0; j < months.length; j++) {
-        try {
-            var monthPL = await qbRequest('/reports/ProfitAndLoss?start_date=' + months[j].start + '&end_date=' + months[j].end);
-            var monthData = parsePLReport(monthPL);
-            monthlyData.push({
-                month: months[j].name,
-                revenue: monthData.totalIncome,
-                expenses: monthData.totalExpenses,
-                profit: monthData.totalIncome - monthData.totalExpenses
+    const now = new Date();
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const endDate = now.toISOString().split('T')[0];
+    const startDate = startOfYear.toISOString().split('T')[0];
+
+    // Fetch P&L Report for monthly summaries
+    const plReport = await qbApiCall(
+        `/reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}&summarize_column_by=Month`
+    );
+
+    // Fetch ALL purchases/expenses with full details
+    const purchases = await qbApiCall(
+        `/query?query=SELECT * FROM Purchase WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
+    // Fetch ALL bills
+    const bills = await qbApiCall(
+        `/query?query=SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
+    // Fetch ALL bill payments
+    const billPayments = await qbApiCall(
+        `/query?query=SELECT * FROM BillPayment WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
+    // Fetch vendors for name lookup
+    const vendors = await qbApiCall(
+        `/query?query=SELECT * FROM Vendor MAXRESULTS 1000`
+    );
+
+    // Fetch accounts for category lookup
+    const accounts = await qbApiCall(
+        `/query?query=SELECT * FROM Account WHERE AccountType IN ('Expense', 'Cost of Goods Sold', 'Other Expense') MAXRESULTS 500`
+    );
+
+    // Fetch sales receipts and invoices for income
+    const salesReceipts = await qbApiCall(
+        `/query?query=SELECT * FROM SalesReceipt WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
+    const payments = await qbApiCall(
+        `/query?query=SELECT * FROM Payment WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
+    // Build lookup maps
+    const vendorMap = {};
+    (vendors.QueryResponse?.Vendor || []).forEach(v => {
+        vendorMap[v.Id] = v.DisplayName || v.CompanyName || 'Unknown Vendor';
+    });
+
+    const accountMap = {};
+    (accounts.QueryResponse?.Account || []).forEach(a => {
+        accountMap[a.Id] = {
+            name: a.Name,
+            type: a.AccountType,
+            subType: a.AccountSubType
+        };
+    });
+
+    // Process transactions with REAL details
+    const transactions = [];
+
+    // Process Purchases (credit card charges, checks, etc.)
+    (purchases.QueryResponse?.Purchase || []).forEach(p => {
+        const vendorName = p.EntityRef?.name || vendorMap[p.EntityRef?.value] || '';
+        const memo = p.PrivateNote || '';
+        
+        // Get line item details
+        const lineDetails = (p.Line || []).map(line => {
+            if (line.AccountBasedExpenseLineDetail) {
+                const acctId = line.AccountBasedExpenseLineDetail.AccountRef?.value;
+                const acctName = line.AccountBasedExpenseLineDetail.AccountRef?.name || accountMap[acctId]?.name || '';
+                return {
+                    description: line.Description || acctName,
+                    category: acctName,
+                    amount: line.Amount
+                };
+            }
+            if (line.ItemBasedExpenseLineDetail) {
+                return {
+                    description: line.Description || line.ItemBasedExpenseLineDetail.ItemRef?.name || '',
+                    category: 'Items',
+                    amount: line.Amount
+                };
+            }
+            return null;
+        }).filter(Boolean);
+
+        // If we have line items, create a transaction for each
+        if (lineDetails.length > 0) {
+            lineDetails.forEach((line, idx) => {
+                transactions.push({
+                    id: `purchase-${p.Id}-${idx}`,
+                    date: p.TxnDate,
+                    description: line.description || vendorName || memo || 'Purchase',
+                    vendor: vendorName,
+                    category: line.category || 'Uncategorized',
+                    amount: -Math.abs(line.amount),
+                    type: 'expense',
+                    paymentType: p.PaymentType || 'Unknown',
+                    source: 'Purchase'
+                });
             });
-        } catch (e) {
-            console.error('Error fetching month', months[j].name, e.message);
-            monthlyData.push({
-                month: months[j].name,
-                revenue: 0,
-                expenses: 0,
-                profit: 0
+        } else {
+            // Single transaction without line items
+            transactions.push({
+                id: `purchase-${p.Id}`,
+                date: p.TxnDate,
+                description: vendorName || memo || 'Purchase',
+                vendor: vendorName,
+                category: 'Uncategorized',
+                amount: -Math.abs(p.TotalAmt),
+                type: 'expense',
+                paymentType: p.PaymentType || 'Unknown',
+                source: 'Purchase'
             });
         }
-    }
-    
-    // Fetch recent transactions
-    var transactions = [];
-    try {
-        var purchases = await qbQuery("SELECT * FROM Purchase ORDER BY TxnDate DESC MAXRESULTS 20");
-        var purchaseList = (purchases && purchases.QueryResponse && purchases.QueryResponse.Purchase) || [];
-        purchaseList.forEach(function(p, i) {
-            transactions.push({
-                id: 'exp-' + i,
-                date: p.TxnDate,
-                description: p.PrivateNote || p.DocNumber || 'Expense',
-                category: 'Expense',
-                amount: -(p.TotalAmt || 0),
-                type: 'expense'
-            });
-        });
-    } catch (e) {
-        console.error('Error fetching purchases:', e.message);
-    }
-    
-    try {
-        var payments = await qbQuery("SELECT * FROM Payment ORDER BY TxnDate DESC MAXRESULTS 20");
-        var paymentList = (payments && payments.QueryResponse && payments.QueryResponse.Payment) || [];
-        paymentList.forEach(function(p, i) {
-            transactions.push({
-                id: 'inc-' + i,
-                date: p.TxnDate,
-                description: p.PrivateNote || 'Payment Received',
-                category: 'Income',
-                amount: p.TotalAmt || 0,
-                type: 'income'
-            });
-        });
-    } catch (e) {
-        console.error('Error fetching payments:', e.message);
-    }
-    
-    // Sort transactions by date
-    transactions.sort(function(a, b) {
-        return new Date(b.date) - new Date(a.date);
     });
-    transactions = transactions.slice(0, 10);
-    
-    // Calculate totals from monthly data if P&L parsing failed
-    var totalRevenue = plData.totalIncome;
-    var totalExpenses = plData.totalExpenses;
-    
-    if (totalRevenue === 0) {
-        totalRevenue = monthlyData.reduce(function(sum, m) { return sum + m.revenue; }, 0);
-        totalExpenses = monthlyData.reduce(function(sum, m) { return sum + m.expenses; }, 0);
-    }
-    
-    var netProfit = totalRevenue - totalExpenses;
-    
-    // Calculate month-over-month changes
-    var lastMonth = monthlyData[monthlyData.length - 1] || { revenue: 0, expenses: 0, profit: 0 };
-    var prevMonth = monthlyData[monthlyData.length - 2] || { revenue: 1, expenses: 1, profit: 1 };
-    
-    var revenueChange = prevMonth.revenue > 0 ? ((lastMonth.revenue - prevMonth.revenue) / prevMonth.revenue * 100) : 0;
-    var expensesChange = prevMonth.expenses > 0 ? ((lastMonth.expenses - prevMonth.expenses) / prevMonth.expenses * 100) : 0;
-    var profitChange = prevMonth.profit > 0 ? ((lastMonth.profit - prevMonth.profit) / prevMonth.profit * 100) : 0;
-    
-    // Use parsed categories or defaults
-    var categories = plData.categories.length > 0 ? plData.categories : [
-        { name: 'Uncategorized', amount: totalExpenses, color: '#64748b' }
-    ];
-    
-    var result = {
+
+    // Process Bills
+    (bills.QueryResponse?.Bill || []).forEach(b => {
+        const vendorName = b.VendorRef?.name || vendorMap[b.VendorRef?.value] || '';
+        const memo = b.PrivateNote || '';
+
+        const lineDetails = (b.Line || []).map(line => {
+            if (line.AccountBasedExpenseLineDetail) {
+                const acctName = line.AccountBasedExpenseLineDetail.AccountRef?.name || '';
+                return {
+                    description: line.Description || acctName,
+                    category: acctName,
+                    amount: line.Amount
+                };
+            }
+            if (line.ItemBasedExpenseLineDetail) {
+                return {
+                    description: line.Description || line.ItemBasedExpenseLineDetail.ItemRef?.name || '',
+                    category: 'Items',
+                    amount: line.Amount
+                };
+            }
+            return null;
+        }).filter(Boolean);
+
+        if (lineDetails.length > 0) {
+            lineDetails.forEach((line, idx) => {
+                transactions.push({
+                    id: `bill-${b.Id}-${idx}`,
+                    date: b.TxnDate,
+                    description: line.description || vendorName || memo || 'Bill',
+                    vendor: vendorName,
+                    category: line.category || 'Uncategorized',
+                    amount: -Math.abs(line.amount),
+                    type: 'expense',
+                    source: 'Bill'
+                });
+            });
+        } else {
+            transactions.push({
+                id: `bill-${b.Id}`,
+                date: b.TxnDate,
+                description: vendorName || memo || 'Bill',
+                vendor: vendorName,
+                category: 'Uncategorized',
+                amount: -Math.abs(b.TotalAmt),
+                type: 'expense',
+                source: 'Bill'
+            });
+        }
+    });
+
+    // Process Sales Receipts (income)
+    (salesReceipts.QueryResponse?.SalesReceipt || []).forEach(sr => {
+        const customerName = sr.CustomerRef?.name || '';
+        transactions.push({
+            id: `salesreceipt-${sr.Id}`,
+            date: sr.TxnDate,
+            description: customerName ? `Payment - ${customerName}` : 'Sales Receipt',
+            customer: customerName,
+            category: 'Income',
+            amount: Math.abs(sr.TotalAmt),
+            type: 'income',
+            source: 'SalesReceipt'
+        });
+    });
+
+    // Process Payments (income)
+    (payments.QueryResponse?.Payment || []).forEach(p => {
+        const customerName = p.CustomerRef?.name || '';
+        transactions.push({
+            id: `payment-${p.Id}`,
+            date: p.TxnDate,
+            description: customerName ? `Payment - ${customerName}` : 'Payment Received',
+            customer: customerName,
+            category: 'Income',
+            amount: Math.abs(p.TotalAmt),
+            type: 'income',
+            source: 'Payment'
+        });
+    });
+
+    // Sort by date descending
+    transactions.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Parse P&L for monthly summaries
+    const monthlyData = parseMonthlyPL(plReport);
+
+    // Calculate category totals from transactions
+    const categoryTotals = {};
+    transactions.filter(t => t.type === 'expense').forEach(t => {
+        const cat = t.category || 'Uncategorized';
+        categoryTotals[cat] = (categoryTotals[cat] || 0) + Math.abs(t.amount);
+    });
+
+    const categories = Object.entries(categoryTotals)
+        .map(([name, amount]) => ({ name, amount }))
+        .sort((a, b) => b.amount - a.amount);
+
+    // Calculate totals
+    const totalExpenses = transactions
+        .filter(t => t.type === 'expense')
+        .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    const totalIncome = transactions
+        .filter(t => t.type === 'income')
+        .reduce((sum, t) => sum + t.amount, 0);
+
+    return {
         summary: {
-            totalRevenue: totalRevenue,
-            totalExpenses: totalExpenses,
-            netProfit: netProfit,
-            revenueChange: Math.round(revenueChange * 10) / 10,
-            expensesChange: Math.round(expensesChange * 10) / 10,
-            profitChange: Math.round(profitChange * 10) / 10
+            totalIncome,
+            totalExpenses,
+            netProfit: totalIncome - totalExpenses,
+            transactionCount: transactions.length
         },
-        monthlyData: monthlyData,
-        categories: categories,
-        transactions: transactions,
+        monthlyData,
+        categories,
+        transactions: transactions.slice(0, 500), // Limit to 500 most recent
+        expenses: categoryTotals,
         timestamp: Date.now(),
         debug: {
             realm_id: tokens.realm_id,
-            date_range: startDate + ' to ' + endDate,
-            raw_income: plData.totalIncome,
-            raw_expenses: plData.totalExpenses
+            date_range: `${startDate} to ${endDate}`,
+            purchase_count: purchases.QueryResponse?.Purchase?.length || 0,
+            bill_count: bills.QueryResponse?.Bill?.length || 0,
+            income_count: (salesReceipts.QueryResponse?.SalesReceipt?.length || 0) + (payments.QueryResponse?.Payment?.length || 0)
         }
     };
-    
-    await fs.writeFile(DATA_FILE, JSON.stringify(result, null, 2));
-    console.log('Data saved. Revenue:', totalRevenue, 'Expenses:', totalExpenses);
-    return result;
 }
 
-loadTokens().then(function() {
-    app.listen(PORT, function() {
-        console.log('Server running on port ' + PORT);
-        console.log('Client ID: ' + QB_CLIENT_ID.substring(0, 10) + '...');
-        console.log('Redirect URI: ' + REDIRECT_URI);
+function parseMonthlyPL(report) {
+    const monthlyData = [];
+    
+    if (!report?.Rows?.Row) return monthlyData;
+
+    const columns = report.Columns?.Column || [];
+    const monthNames = columns.slice(1).map(c => {
+        // Extract month from column title (e.g., "Jan 2024")
+        const parts = (c.ColTitle || '').split(' ');
+        return parts[0] || '';
     });
-});
+
+    let incomeRow = null;
+    let expenseRow = null;
+
+    // Find Total Income and Total Expenses rows
+    const findRow = (rows, label) => {
+        for (const row of rows) {
+            if (row.Summary?.ColData?.[0]?.value?.toLowerCase().includes(label.toLowerCase())) {
+                return row.Summary;
+            }
+            if (row.Rows?.Row) {
+                const found = findRow(row.Rows.Row, label);
+                if (found) return found;
+            }
+        }
+        return null;
+    };
+
+    incomeRow = findRow(report.Rows.Row, 'Total Income');
+    expenseRow = findRow(report.Rows.Row, 'Total Expenses');
+
+    // Build monthly data
+    monthNames.forEach((month, idx) => {
+        if (!month) return;
+        
+        const revenue = parseFloat(incomeRow?.ColData?.[idx + 1]?.value) || 0;
+        const expenses = parseFloat(expenseRow?.ColData?.[idx + 1]?.value) || 0;
+        
+        monthlyData.push({
+            month,
+            revenue,
+            expenses,
+            profit: revenue - expenses
+        });
+    });
+
+    return monthlyData;
+}
+
+// ========== START SERVER ==========
+
+async function start() {
+    await loadTokens();
+
+    app.listen(PORT, () => {
+        console.log(`\n🚀 ASAP Financial Dashboard Backend`);
+        console.log(`   Server running on port ${PORT}`);
+        console.log(`   Environment: ${QB_ENVIRONMENT}`);
+        console.log(`   Connected: ${!!tokens.access_token}`);
+        console.log(`\n   Endpoints:`);
+        console.log(`   - GET  /api/quickbooks/auth`);
+        console.log(`   - GET  /api/quickbooks/callback`);
+        console.log(`   - GET  /api/quickbooks/status`);
+        console.log(`   - GET  /api/quickbooks/data`);
+        console.log(`   - POST /api/quickbooks/refresh`);
+        console.log(`   - POST /api/quickbooks/disconnect\n`);
+    });
+}
+
+start();
