@@ -263,6 +263,16 @@ async function fetchFinancialData() {
         `/query?query=SELECT * FROM Payment WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
     );
 
+    // Fetch Deposits (bank deposits - often how ACH/merchant payments show up)
+    const deposits = await qbApiCall(
+        `/query?query=SELECT * FROM Deposit WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
+    // Fetch Invoices for additional income tracking
+    const invoices = await qbApiCall(
+        `/query?query=SELECT * FROM Invoice WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000`
+    );
+
     // Build lookup maps
     const vendorMap = {};
     (vendors.QueryResponse?.Vendor || []).forEach(v => {
@@ -419,6 +429,49 @@ async function fetchFinancialData() {
         });
     });
 
+    // Process Deposits (bank deposits - ACH, merchant processing, etc.)
+    (deposits.QueryResponse?.Deposit || []).forEach(d => {
+        // Get line item details from deposit
+        const lineDetails = (d.Line || []).map(line => {
+            if (line.DepositLineDetail) {
+                const customerName = line.DepositLineDetail.Entity?.name || '';
+                const memo = line.Description || '';
+                return {
+                    description: customerName || memo || 'Deposit',
+                    customer: customerName,
+                    amount: line.Amount
+                };
+            }
+            return null;
+        }).filter(Boolean);
+
+        if (lineDetails.length > 0) {
+            lineDetails.forEach((line, idx) => {
+                transactions.push({
+                    id: `deposit-${d.Id}-${idx}`,
+                    date: d.TxnDate,
+                    description: line.description,
+                    customer: line.customer,
+                    category: 'Income',
+                    amount: Math.abs(line.amount),
+                    type: 'income',
+                    source: 'Deposit'
+                });
+            });
+        } else {
+            // Single deposit without line items
+            transactions.push({
+                id: `deposit-${d.Id}`,
+                date: d.TxnDate,
+                description: d.PrivateNote || 'Bank Deposit',
+                category: 'Income',
+                amount: Math.abs(d.TotalAmt),
+                type: 'income',
+                source: 'Deposit'
+            });
+        }
+    });
+
     // Sort by date descending
     transactions.sort((a, b) => new Date(b.date) - new Date(a.date));
 
@@ -462,7 +515,10 @@ async function fetchFinancialData() {
             date_range: `${startDate} to ${endDate}`,
             purchase_count: purchases.QueryResponse?.Purchase?.length || 0,
             bill_count: bills.QueryResponse?.Bill?.length || 0,
-            income_count: (salesReceipts.QueryResponse?.SalesReceipt?.length || 0) + (payments.QueryResponse?.Payment?.length || 0)
+            salesreceipt_count: salesReceipts.QueryResponse?.SalesReceipt?.length || 0,
+            payment_count: payments.QueryResponse?.Payment?.length || 0,
+            deposit_count: deposits.QueryResponse?.Deposit?.length || 0,
+            invoice_count: invoices.QueryResponse?.Invoice?.length || 0
         }
     };
 }
